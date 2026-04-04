@@ -130,13 +130,20 @@ class ArgonSilentUI:
         self.log_area.insert(tk.END, f"> {text}\n")
         self.log_area.see(tk.END)
         
-        # 状态检测逻辑
+        # --- 状态检测逻辑 (修改此处) ---
         if '"error_code":0' in text or 'Result: 0' in text:
             self.set_status("认证成功：在线中 🚀", self.C_SUCCESS)
             self.update_tips("✨ 认证成功！现在可以放心关闭此窗口")
+            
         elif '-210' in text:
             self.set_status("服务就绪：已登录 ✅", self.C_SUCCESS)
             self.update_tips("📢 检测到已登录状态，内核将维持连接")
+            
+        elif '-1018' in text or "认证失败" in text:
+            self.set_status("认证失败：账密有误 ❌", self.C_DANGER)
+            self.update_tips("⚠️ 账号或密码错误，请检查后重新输入")
+            # 账号错误时建议停止服务，方便用户修改后重新发起
+            self.root.after(1000, self.stop_service)
 
     def update_tips(self, msg):
         self.tips_cv.itemconfig(self.tips_txt, text=msg)
