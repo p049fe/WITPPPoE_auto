@@ -712,3 +712,168 @@ SO_MARK + SO_BINDTODEVICE
 mwan3 use wanb
 
 现在三者已经串起来了。这样以后即使线路 2 掉认证、校园网断线、恢复，整个系统也可以自己处理。
+
+# 创建最终检测脚本
+
+```
+cat > /usr/bin/mwan3-http-check.sh <<'EOF'
+#!/bin/sh
+
+INTERFACE="wanb"
+MEMBER="wanb_m1_w1"
+URL="http://www.google.cn/generate_204"
+
+INTERVAL=10
+TIMEOUT=8
+
+# 连续成功/失败多少次才切换
+UP_COUNT=2
+DOWN_COUNT=3
+
+STATE_FILE="/tmp/mwan3-http-check.state"
+
+log() {
+    logger -t mwan3-http-check "$*"
+}
+
+# 防止重复启动
+if [ -f /tmp/mwan3-http-check.pid ]; then
+    OLD_PID="$(cat /tmp/mwan3-http-check.pid)"
+    if kill -0 "$OLD_PID" 2>/dev/null; then
+        exit 0
+    fi
+fi
+
+echo $$ > /tmp/mwan3-http-check.pid
+trap 'rm -f /tmp/mwan3-http-check.pid' EXIT
+
+STATE="down"
+SUCCESS=0
+FAIL=0
+
+if [ -f "$STATE_FILE" ]; then
+    . "$STATE_FILE"
+fi
+
+set_weight() {
+    NEW_WEIGHT="$1"
+
+    CURRENT="$(uci -q get mwan3.${MEMBER}.weight)"
+
+    if [ "$CURRENT" != "$NEW_WEIGHT" ]; then
+        uci set mwan3.${MEMBER}.weight="$NEW_WEIGHT"
+        uci commit mwan3
+
+        # mwan3 没有 reload，使用 restart
+        mwan3 restart >/dev/null 2>&1
+
+        log "wanb weight changed: $CURRENT -> $NEW_WEIGHT"
+    fi
+}
+
+check_http() {
+    CODE="$(
+        mwan3 use "$INTERFACE" \
+            curl -4 -sS \
+            -o /dev/null \
+            -w '%{http_code}' \
+            --connect-timeout "$TIMEOUT" \
+            --max-time "$TIMEOUT" \
+            "$URL" 2>/dev/null
+    )"
+
+    [ "$CODE" = "204" ]
+}
+
+while true; do
+
+    if check_http; then
+        FAIL=0
+        SUCCESS=$((SUCCESS + 1))
+
+        log "HTTP OK: 204 (${SUCCESS}/${UP_COUNT})"
+
+        if [ "$SUCCESS" -ge "$UP_COUNT" ]; then
+            if [ "$STATE" != "up" ]; then
+                STATE="up"
+                set_weight 1
+                log "wanb ONLINE: HTTP 204"
+            fi
+        fi
+
+    else
+        SUCCESS=0
+        FAIL=$((FAIL + 1))
+
+        log "HTTP FAILED (${FAIL}/${DOWN_COUNT})"
+
+        if [ "$FAIL" -ge "$DOWN_COUNT" ]; then
+            if [ "$STATE" != "down" ]; then
+                STATE="down"
+                set_weight 0
+                log "wanb OFFLINE: HTTP check failed"
+            fi
+        fi
+    fi
+
+    cat > "$STATE_FILE" <<STATEEOF
+STATE="$STATE"
+SUCCESS=$SUCCESS
+FAIL=$FAIL
+STATEEOF
+
+    sleep "$INTERVAL"
+done
+EOF
+
+chmod +x /usr/bin/mwan3-http-check.sh
+```
+
+# 创建开机自启动
+```
+cat > /etc/init.d/mwan3-http-check <<'EOF'
+#!/bin/sh /etc/rc.common
+
+START=99
+USE_PROCD=1
+
+start_service() {
+    procd_open_instance
+
+    procd_set_param command /usr/bin/mwan3-http-check.sh
+
+    procd_set_param respawn 3600 5 5
+
+    procd_close_instance
+}
+EOF
+
+chmod +x /etc/init.d/mwan3-http-check
+```
+
+# 开机启动 + 立即启动
+```
+/etc/init.d/mwan3-http-check enable
+/etc/init.d/mwan3-http-check start
+```
+
+# 看它现在干得怎么样
+```
+logread -f | grep mwan3-http-check
+```
+
+正常情况下你应该很快看到：
+
+mwan3-http-check: HTTP OK: 204 (1/2)
+mwan3-http-check: HTTP OK: 204 (2/2)
+mwan3-http-check: wanb ONLINE: HTTP 204
+
+然后：
+
+mwan3 status
+
+应该看到：
+
+balanced:
+ wanb (50%)
+ wan  (50%)
