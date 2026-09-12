@@ -1,0 +1,54 @@
+OpenWrt 25 防校园网封禁配置笔记1. 问题根因触发条件：短时间内 UDP 并发连接数与报文发包率暴增（P2P/BT 下载软件频繁寻找 Peer 节点导致）。  检测机制：校园网防共享系统通过检测并发连接数异常以及内网多设备 TTL 特征判定违规。  2. TTL 防检测配置作用：统一出站数据包的 TTL 值为 64，隐藏路由器下的多级设备特征。  配置文件：/etc/nftables.d/ttl.nft完整配置：Bashcat << 'EOF' > /etc/nftables.d/ttl.nft
+chain mangle_postrouting_ttl {
+	type filter hook postrouting priority mangle; policy accept;
+	oifname "wan" ip ttl set 64
+	oifname "wan" ip6 hoplimit set 64
+}
+EOF
+chmod 644 /etc/nftables.d/ttl.nft
+3. UDP 速率限制配置（代替连接数统计）作用：限制出站 UDP 报文速率不超过 500 pkt/s，防止 P2P 流量暴涨触发校园网封禁，同时不影响日常语音/网页/游戏。配置文件：/etc/nftables.d/99-udp-limit.nft完整配置：Bashcat << 'EOF' > /etc/nftables.d/99-udp-limit.nft
+chain forward_udp_limit {
+	type filter hook forward priority 0; policy accept;
+	oifname "wan" meta l4proto udp limit rate over 500/second drop
+}
+EOF
+chmod 644 /etc/nftables.d/99-udp-limit.nft
+4. 生效与避坑指南应用生效：修改后必须执行 /etc/init.d/firewall restart。  权限避坑：/etc/nftables.d/ 目录下的 .nft 文件绝对不能赋予可执行权限 (chmod +x)，否则 OpenWrt fw4 会误将其当作 Shell 脚本运行导致 sh: not found 报错。文件权限设为 644 即可。P2P 客户端：建议在迅雷/BT 软件中同步将最大并发连接数限制在 150~200 以内。
+
+====
+
+如果是多播（MWAN3 / 双 WAN 负载均衡），或者将 lan2 接口作为第二个 WAN 口使用，原有的规则只对名为 "wan" 的接口生效。
+
+只需将 oifname "wan" 改为匹配多个接口的集合语法 oifname { "wan", "lan2" } 即可。
+
+多播 / 双 WAN 适配配置
+直接在 AX3000T 终端中运行以下命令更新两个配置文件：
+
+1. 更新 TTL 防检测规则（覆盖 wan 和 lan2）
+Bash
+cat << 'EOF' > /etc/nftables.d/ttl.nft
+chain mangle_postrouting_ttl {
+	type filter hook postrouting priority mangle; policy accept;
+	oifname { "wan", "lan2" } ip ttl set 64
+	oifname { "wan", "lan2" } ip6 hoplimit set 64
+}
+EOF
+chmod 644 /etc/nftables.d/ttl.nft
+2. 更新 UDP 速率限制规则（覆盖 wan 和 lan2）
+Bash
+cat << 'EOF' > /etc/nftables.d/99-udp-limit.nft
+chain forward_udp_limit {
+	type filter hook forward priority 0; policy accept;
+	oifname { "wan", "lan2" } meta l4proto udp limit rate over 500/second drop
+}
+EOF
+chmod 644 /etc/nftables.d/99-udp-limit.nft
+3. 重启防火墙生效
+Bash
+/etc/init.d/firewall restart
+注意事项（多播坑点）
+限制颗粒度：limit rate over 500/second drop 作用于具体接口。写成 { "wan", "lan2" } 后，系统会为两个接口分别计算上限（即 wan 最多 500 pkt/s，lan2 最多 500 pkt/s），双出口叠加最大可达到 1000 pkt/s。
+
+接口名称确认：如果你的第二个出口在 OpenWrt 逻辑接口名里叫 lan2，但在底层物理网卡名叫 eth1 或 macvlan1（如单线多播），请确保 oifname填入的是防火墙识别的实际物理/虚拟接口名。
+
+可以通过 nft list chain inet fw4 forward_udp_limit 查看是否双接口都已挂载成功。
