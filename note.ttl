@@ -1,0 +1,16 @@
+OpenWrt 25 防校园网封禁配置笔记1. 问题根因触发条件：短时间内 UDP 并发连接数与报文发包率暴增（P2P/BT 下载软件频繁寻找 Peer 节点导致）。  检测机制：校园网防共享系统通过检测并发连接数异常以及内网多设备 TTL 特征判定违规。  2. TTL 防检测配置作用：统一出站数据包的 TTL 值为 64，隐藏路由器下的多级设备特征。  配置文件：/etc/nftables.d/ttl.nft完整配置：Bashcat << 'EOF' > /etc/nftables.d/ttl.nft
+chain mangle_postrouting_ttl {
+	type filter hook postrouting priority mangle; policy accept;
+	oifname "wan" ip ttl set 64
+	oifname "wan" ip6 hoplimit set 64
+}
+EOF
+chmod 644 /etc/nftables.d/ttl.nft
+3. UDP 速率限制配置（代替连接数统计）作用：限制出站 UDP 报文速率不超过 500 pkt/s，防止 P2P 流量暴涨触发校园网封禁，同时不影响日常语音/网页/游戏。配置文件：/etc/nftables.d/99-udp-limit.nft完整配置：Bashcat << 'EOF' > /etc/nftables.d/99-udp-limit.nft
+chain forward_udp_limit {
+	type filter hook forward priority 0; policy accept;
+	oifname "wan" meta l4proto udp limit rate over 500/second drop
+}
+EOF
+chmod 644 /etc/nftables.d/99-udp-limit.nft
+4. 生效与避坑指南应用生效：修改后必须执行 /etc/init.d/firewall restart。  权限避坑：/etc/nftables.d/ 目录下的 .nft 文件绝对不能赋予可执行权限 (chmod +x)，否则 OpenWrt fw4 会误将其当作 Shell 脚本运行导致 sh: not found 报错。文件权限设为 644 即可。P2P 客户端：建议在迅雷/BT 软件中同步将最大并发连接数限制在 150~200 以内。
